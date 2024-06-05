@@ -38,6 +38,7 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python = ">=3.8,<4.0"
+graphviz = "^0.20.3"
 
 
 [tool.poetry.dev-dependencies]
