@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import sys
-from pathlib import Path
+
+from git_revision_graph import create_dot_source
 
 
-def main(argv):
-    print(Path(__file__))
+def main():
+    create_dot_source(sys.argv[1:])
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

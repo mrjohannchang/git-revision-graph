@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "git-revision-graph"
-version = "0.0.1"
+version = "0.0.2"
 description = "Generate revision graph like TortoiseGit did for chosen branches"
 readme = "README.md"
 authors = ["chaoqing <chaoqingwang.nick@gmail.com>"]

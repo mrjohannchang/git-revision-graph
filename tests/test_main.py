@@ -1,8 +1,8 @@
 import pytest
 
-from git_revision_graph.__main__ import main
+from git_revision_graph import create_dot_source
 
 
-@pytest.mark.parametrize(("argv",), [(["--help"],)])
+@pytest.mark.parametrize(("argv",), [(["--version"],)])
 def test_main(argv):
-    main(argv)
+    create_dot_source(argv)
