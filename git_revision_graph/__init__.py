@@ -8,6 +8,8 @@ import re
 import subprocess
 import sys
 from collections import namedtuple
+from datetime import datetime
+from functools import cached_property
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
@@ -15,42 +17,10 @@ import graphviz
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
-    level=logging.DEBUG,
+    level=logging.WARNING,
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-def split_by_wildcard_pattern(strings: Iterable[str], patterns: List[str]):
-    if len(patterns) == 0:
-        return set(), strings
-    match_set = set()
-    no_match_set = set()
-
-    for s in strings:
-        if any(fnmatch.fnmatch(s, p) for p in patterns):
-            match_set.add(s)
-        else:
-            no_match_set.add(s)
-    return match_set, no_match_set
-
-
-def split_by_regex_pattern(strings: Iterable[str], patterns: List[str]):
-    if len(patterns) == 0:
-        return set(), strings
-
-    match_set = set()
-    no_match_set = set()
-
-    re_pts = [re.compile(p) for p in patterns]
-
-    for s in strings:
-        if any(p.search(s) for p in re_pts):
-            match_set.add(s)
-        else:
-            no_match_set.add(s)
-
-    return match_set, no_match_set
 
 
 def get_version() -> str:
@@ -70,29 +40,57 @@ class Repo:
     def __init__(self, path: Path = Path(".")):
         self.path = path
 
-    def filter_refs(
-        self,
-        ref_filters: RefFilters,
-        use_regex: bool = True,
-    ):
+    @cached_property
+    def refs(self):
         with subprocess.Popen(
             [GIT_PATH, "--no-pager", "for-each-ref", "--format=%(refname)"],
             cwd=self.path,
             stdout=subprocess.PIPE,
         ) as proc:
             assert proc.stdout is not None
-            refs = {i.decode().strip() for i in proc.stdout}
+            return {i.decode().strip() for i in proc.stdout}
+
+    @cached_property
+    def local_branches(self):
+        return {
+            r[len("refs/heads/") :] for r in self.refs if r.startswith("refs/heads/")
+        }
+
+    @cached_property
+    def remote_branches(self):
+        return {
+            r[len("refs/remotes/") :]
+            for r in self.refs
+            if r.startswith("refs/remotes/")
+        }
+
+    @cached_property
+    def tags(self):
+        return {
+            r[len("refs/tags/") :] for r in self.refs if r.startswith("refs/tagss/")
+        }
+
+    def filter_refs(
+        self,
+        ref_filters: RefFilters,
+        use_regex: bool = True,
+    ):
+        def split_by_wildcard_pattern(strings: Iterable[str], patterns: List[str]):
+            return {s for s in strings if any(fnmatch.fnmatch(s, p) for p in patterns)}
+
+        def split_by_regex_pattern(strings: Iterable[str], patterns: List[str]):
+            re_pts = [re.compile(p) for p in patterns]
+            return {s for s in strings if any(p.search(s) for p in re_pts)}
 
         match_func = split_by_regex_pattern if use_regex else split_by_wildcard_pattern
 
-        matched_refs, refs = match_func(refs, ref_filters.ref)
-        matched_refs = {s.split("/", maxsplit=2)[-1] for s in matched_refs}
-        refs = {s.split("/", maxsplit=1)[-1] for s in refs}
-
-        for patterns, prefix in zip(ref_filters[1:], ("heads/", "remotes/", "tags/")):
-            matched_refs |= match_func(
-                (s[len(prefix) :] for s in refs if s.startswith(prefix)), patterns
-            )[0]
+        matched_refs = {
+            s.split("/", maxsplit=2)[-1] for s in match_func(self.refs, ref_filters.ref)
+        }
+        for patterns, candidates in zip(
+            ref_filters[1:], (self.local_branches, self.remote_branches, self.tags)
+        ):
+            matched_refs |= match_func(candidates, patterns)
 
         return list(matched_refs)
 
@@ -105,7 +103,7 @@ class Repo:
                 "--pretty=format:"
                 '{ "id": "%H", "author": "%an", "email": "%ae", "date": "%ad", "message": "%f", "parent": "%P", "ref": "%D" }'
             ),
-            "--date=iso",
+            "--date=unix",
         ]
         if simplify:
             git_command.append("--simplify-by-decoration")
@@ -168,6 +166,14 @@ def parse_args(argv):
     )
 
     parser.add_argument(
+        "-v",
+        dest="verbose",
+        action="count",
+        default=0,
+        help="Increase logging verbosity (e.g., -v for INFO, -vv for DEBUG)",
+    )
+
+    parser.add_argument(
         "--output",
         "-o",
         default="-",
@@ -175,6 +181,12 @@ def parse_args(argv):
     )
 
     args = parser.parse_args(argv)
+    logger.setLevel(
+        {
+            0: logging.WARNING,
+            1: logging.INFO,
+        }.get(args.verbose, logging.DEBUG)
+    )
 
     return args
 
@@ -185,13 +197,27 @@ def generate_dot_script(path: Path, ref_filters: RefFilters, pattern_type: str):
         ref_filters,
         use_regex=pattern_type == "regex",
     )
-    logger.debug("filtered refs: " + json.dumps(refs, indent=2))
+    logger.info("filtered refs: " + json.dumps(refs, indent=2))
     logs = repo.history(refs)
-    logger.debug("history json: " + json.dumps(logs, indent=2))
+    logger.info("history json: " + json.dumps(logs, indent=2))
 
     dot = graphviz.Digraph(comment="Git")
     for commit in logs:
-        dot.node(commit["id"], commit["message"])
+        if commit["ref"] == "":
+            refs = [commit["id"][:8]]
+        else:
+            refs = [r.split("->")[-1].strip() for r in commit["ref"].split(",")]
+        date = datetime.fromtimestamp(int(commit["date"])).strftime("%y/%m/%d")
+        message = f"""<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
+            <TR>
+                <TD BGCOLOR="lightgreen"><B>{date}</B></TD>
+                <TD BGCOLOR="lightblue"> <B>{commit["author"]}</B></TD>
+            </TR>
+            <TR>
+                <TD>{"</TD><TD>".join(refs)}</TD>
+            </TR>
+        </TABLE>>"""
+        dot.node(commit["id"], message)
         if commit["parent"] != "":
             for parent in commit["parent"].split(" "):
                 dot.edge(parent, commit["id"])
@@ -215,8 +241,12 @@ def create_dot_source(argv):
 
     if args.output == "-":
         print(dot_source)
-    else:
+    elif args.output.endswith(".dot"):
         Path(args.output).write_text(dot_source)
+    elif args.output.endswith(".svg"):
+        subprocess.run(["dot", "-Tsvg", "-o", args.output], input=dot_source.encode())
+    else:
+        logger.warning("not supported output format for " + args.output)
 
 
 if __name__ == "__main__":
