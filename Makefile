@@ -51,6 +51,7 @@ formatting: codestyle
 test:
 	PYTHONPATH=$(PYTHONPATH) poetry run pytest -c pyproject.toml --cov-report=html --cov=git_revision_graph tests/
 	poetry run coverage-badge -o assets/images/coverage.svg -f
+	-poetry run python -m git_revision_graph -o assets/images/graph.svg
 
 .PHONY: check-codestyle
 check-codestyle:

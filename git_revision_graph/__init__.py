@@ -1,4 +1,4 @@
-from typing import Iterable, List
+from typing import Iterable, List, Optional, Tuple
 
 import argparse
 import fnmatch
@@ -11,6 +11,7 @@ from collections import namedtuple
 from datetime import datetime
 from functools import cached_property
 from importlib import metadata as importlib_metadata
+from itertools import zip_longest
 from pathlib import Path
 
 import graphviz
@@ -34,6 +35,46 @@ version: str = get_version()
 
 RefFilters = namedtuple("RefFilters", ["ref", "local", "remote", "tag"])
 GIT_PATH = "git"
+
+
+class DateRangeAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        try:
+            start, *end = values.split(",")
+            if len(end) == 0:
+                if start.startswith("+"):
+                    start, end = None, start[1:]
+                else:
+                    end = None
+            elif len(end) == 1:
+                (end,) = end
+            else:
+                raise ValueError()
+
+            date_parser = lambda s: (
+                datetime.strptime(
+                    s,
+                    next(
+                        (
+                            v
+                            for k, v in {
+                                r"^\d{8}$": "%Y%m%d",
+                                r"^\d{6}$": "%y%m%d",
+                                r"^\d{4}-\d{2}-\d{2}$": "%Y-%m-%d",
+                                r"^\d{2}-\d{2}-\d{2}$": "%y-%m-%d",
+                            }.items()
+                            if re.match(k, s)
+                        ),
+                        "",
+                    ),
+                )
+                if s is not None
+                else None
+            )
+
+            namespace.time = date_parser(start), date_parser(end)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Invalid date range format: {values}")
 
 
 class Repo:
@@ -166,6 +207,13 @@ def parse_args(argv):
     )
 
     parser.add_argument(
+        "--time",
+        action=DateRangeAction,
+        default=(None, None),
+        help="filter the date range of the commits, e.g. '--time +20240612' for before the day, or  '--time 240610,240616' for between the two days",
+    )
+
+    parser.add_argument(
         "-v",
         dest="verbose",
         action="count",
@@ -191,7 +239,12 @@ def parse_args(argv):
     return args
 
 
-def generate_dot_script(path: Path, ref_filters: RefFilters, pattern_type: str):
+def generate_dot_script(
+    path: Path,
+    ref_filters: RefFilters,
+    pattern_type: str,
+    date_range: Tuple[Optional[datetime], Optional[datetime]],
+):
     repo = Repo(path)
     refs = repo.filter_refs(
         ref_filters,
@@ -201,21 +254,53 @@ def generate_dot_script(path: Path, ref_filters: RefFilters, pattern_type: str):
     logs = repo.history(refs)
     logger.info("history json: " + json.dumps(logs, indent=2))
 
+    date_begin, date_end = date_range
+
     dot = graphviz.Digraph(comment="Git")
     for commit in logs:
-        if commit["ref"] == "":
-            refs = [commit["id"][:8]]
-        else:
+        date = datetime.fromtimestamp(int(commit["date"]))
+        if (date_begin is not None and date < date_begin) or (
+            date_end is not None and date > date_end
+        ):
+            continue
+        if commit["ref"] != "":
             refs = [r.split("->")[-1].strip() for r in commit["ref"].split(",")]
-        date = datetime.fromtimestamp(int(commit["date"])).strftime("%y/%m/%d")
+
+            refs_html = []
+            remote_branches = set()
+            local_branches = set()
+            for r in refs:
+                if r.startswith("tag: "):
+                    refs_html.append(f'<TD BGCOLOR="lightgrey">{r[len("tag: "):]}</TD>')
+                elif r in repo.remote_branches:
+                    remote_branches.add(r)
+                else:
+                    local_branches.add(r)
+
+            for r in remote_branches:
+                local_r = r.split("/", maxsplit=1)[-1]
+                if local_r in local_branches:
+                    refs_html.append(f"<TD><B>{r}</B></TD>")
+                    local_branches.remove(local_r)
+                else:
+                    refs_html.append(f"<TD>{r}</TD>")
+
+            for r in local_branches:
+                refs_html.append(f'<TD><font color="lightblue">{r}</font></TD>')
+
+            table_html = "</TR><TR>".join(
+                f"{l}{r}"
+                for l, r in zip_longest(refs_html[::2], refs_html[1::2], fillvalue="")
+            )
+        else:
+            table_html = f'<TD><font color="grey">{commit["id"][:8]}</font></TD>'
+
         message = f"""<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
             <TR>
-                <TD BGCOLOR="lightgreen"><B>{date}</B></TD>
-                <TD BGCOLOR="lightblue"> <B>{commit["author"]}</B></TD>
+                <TD BGCOLOR="lightgreen"><B>{date.strftime("%y/%m/%d")}</B></TD>
+                <TD BGCOLOR="lightblue"><B>{commit["author"]}</B></TD>
             </TR>
-            <TR>
-                <TD>{"</TD><TD>".join(refs)}</TD>
-            </TR>
+            <TR>{table_html}</TR>
         </TABLE>>"""
         dot.node(commit["id"], message)
         if commit["parent"] != "":
@@ -236,7 +321,9 @@ def create_dot_source(argv):
     if all(len(i) == 0 for i in ref_filters):
         ref_filters = RefFilters([], [".*"], [], [])
 
-    dot_source = generate_dot_script(Path(args.repository), ref_filters, args.type)
+    dot_source = generate_dot_script(
+        Path(args.repository), ref_filters, args.type, args.time
+    )
     logger.debug(dot_source)
 
     if args.output == "-":
