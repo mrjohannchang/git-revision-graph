@@ -158,8 +158,15 @@ class Repo:
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Generate revision graph like TortoiseGit did for chosen branches"
+        description="""
+Generate revision graph like TortoiseGit did for chosen branches
+
+example:
+    git-revision-graph -p "refs/tags/bugfix*" -r "release/v1.*" --time +20240612 | tred | dot -Tsvg -o graph.svg
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+
     parser.add_argument("--version", action="store_true")
 
     parser.add_argument(

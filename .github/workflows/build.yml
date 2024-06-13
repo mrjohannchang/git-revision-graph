@@ -24,8 +24,10 @@ jobs:
         with:
           path: .venv
           key: venv-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('poetry.lock') }}
+
       - name: Install dependencies
         run: |
+          sudo apt update && sudo apt install -y graphviz
           poetry config virtualenvs.in-project true
           poetry install
 
