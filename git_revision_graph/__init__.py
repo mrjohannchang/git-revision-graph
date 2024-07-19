@@ -147,83 +147,98 @@ class Repo:
         if simplify:
             git_command.append("--simplify-by-decoration")
 
+        def parse_commit_info(line: str):
+            commit = json.loads(line)
+            commit["parent"] = commit["parent"].split(" ")
+            if commit["ref"] != "":
+                commit["ref"] = [
+                    r.split("->")[-1].strip() for r in commit["ref"].split(", ")
+                ]
+            else:
+                commit["ref"] = [f"id: {commit['id'][:8]}"]
+            return commit
+
         with subprocess.Popen(
             git_command + refs, cwd=self.path, stdout=subprocess.PIPE
         ) as proc:
             assert proc.stdout is not None
-            return [json.loads(i.decode()) for i in proc.stdout]
+            return [parse_commit_info(l.decode()) for l in proc.stdout]
 
-    def filter_history(self, refs: List[str]):
-        logs = self.history(refs)
-        logger.debug("history json before filter: " + json.dumps(logs, indent=2))
-        CommitNode = namedtuple("CommitNode", ["successors", "parents", "refs"])
-        network: Dict[str, CommitNode] = dict()
 
-        # scan the commits to build the network
-        for commit in logs:
-            node = network.setdefault(
-                commit["id"], CommitNode(successors=[], parents=[], refs=[])
-            )
-            node.parents.extend(commit["parent"].split(" "))
-            if commit["ref"] != "":
-                node.refs.extend(
-                    r.split("->")[-1].strip() for r in commit["ref"].split(", ")
-                )
-            for p in node.parents:
-                parent_node = network.setdefault(
-                    p, CommitNode(successors=[], parents=[], refs=[])
-                )
-                parent_node.successors.append(commit["id"])
+def filter_history(logs, refs: List[str]):
+    logger.debug("history json before filter: " + json.dumps(logs, indent=2))
+    CommitNode = namedtuple("CommitNode", ["successors", "parents", "refs"])
 
-        # filter the refs for each commit to mark those can be removed in the graph
-        for commit_id, node in network.items():
-            important_refs = [
+    # scan the commits to build the network
+    all_commit_ids = [commit["id"] for commit in logs]
+    all_commit_ids.append("")
+    network: Dict[str, CommitNode] = {
+        commit["id"]: CommitNode(
+            successors=[],
+            parents=[p for p in commit["parent"] if p in all_commit_ids],
+            refs=[
                 r
-                for r in node.refs
+                for r in commit["ref"]
                 if (r[len("tag: ") :] if r.startswith("tag: ") else r) in refs
-            ]
+            ],
+        )
+        for commit in logs
+    }
+    network[""] = CommitNode(
+        successors=[],
+        parents=[],
+        refs=[],
+    )
 
-            # for those merge commits or last commits, ignore the filter rule
-            if len(node.successors) != 1 or len(node.parents) != 1:
-                if not important_refs:
-                    # just one ref will be given with priority: tag/other ref/commit id
-                    important_refs.append(
-                        next(
-                            chain.from_iterable(
-                                (
-                                    (r for r in node.refs if r.startswith("tag: ")),
-                                    (r for r in node.refs if not r.startswith("tag: ")),
-                                )
-                            ),
-                            f"id: {commit_id[:8]}",
-                        )
-                    )
+    for commit_id, node in network.items():
+        for p in node.parents:
+            network[p].successors.append(commit_id)
 
-            node.refs.clear()
-            node.refs.extend(important_refs)
-
+    # filter the refs for each commit to mark those can be removed in the graph
+    for commit_id, node in network.items():
+        # for those merge commits or last commits, ignore the filter rule
         # for the init commits, give it a default tag
-        for i, root_id in enumerate(network.pop("").successors):
-            if not network[root_id].refs:
-                network[root_id].refs.append("INIT" if i == 0 else f"Orphan{i}")
+        if len(node.successors) != 1 or len(node.parents) != 1 and not node.refs:
+            # just one ref will be given with priority: tag/other ref/commit id
+            all_refs: List[str] = next(
+                (commit["ref"] for commit in logs if commit["id"] == commit_id), []
+            )
+            default_ref_type = "init" if len(node.parents) == 0 else "id"
+            node.refs.append(
+                next(
+                    chain.from_iterable(
+                        (
+                            (r for r in all_refs if r.startswith("tag: ")),
+                            (r for r in all_refs if not r.startswith("tag: ")),
+                        )
+                    ),
+                    f"{default_ref_type}: {commit_id[:8]}",
+                )
+            )
 
-        logs = [commit for commit in logs if network[commit["id"]].refs]
-        for commit in logs:
-            node = network[commit["id"]]
-            parents = [p for p in node.parents if p != ""]
-            for p in range(len(parents)):
-                parent_id = node.parents[p]
-                while True:
-                    if network[parent_id].refs:
-                        # it will always exit because we have guard on the init commits
-                        break
-                    else:
-                        # the to be removed node must have only one parent
-                        parent_id = network[parent_id].parents[0]
-                parents[p] = parent_id
-            commit["parent"] = list(set(parents))
+    logs = [commit for commit in logs if network[commit["id"]].refs]
+    for commit in logs:
+        node = network[commit["id"]]
+        if node.parents[0] == "":
+            commit["parent"] = [""]
             commit["ref"] = list(set(node.refs))
-        return logs
+            continue
+
+        parents = [p for p in node.parents]
+        for p in range(len(parents)):
+            parent_id = node.parents[p]
+            while True:
+                if network[parent_id].refs:
+                    # it will always exit because we have guard on the init commits
+                    break
+                else:
+                    # the to be removed node must have only one parent
+                    parent_id = network[parent_id].parents[0]
+            parents[p] = parent_id
+        commit["parent"] = list(set(parents))
+        commit["ref"] = list(set(node.refs))
+    logger.debug("history json after filter: " + json.dumps(logs, indent=2))
+    return logs
 
 
 def parse_args(argv):
@@ -284,6 +299,13 @@ example:
     )
 
     parser.add_argument(
+        "--no-simplify",
+        action="store_true",
+        dest="no_simplify",
+        help="do not simplify the graph",
+    )
+
+    parser.add_argument(
         "--time",
         action=DateRangeAction,
         default=(None, None),
@@ -321,6 +343,7 @@ def generate_dot_script(
     ref_filters: RefFilters,
     pattern_type: str,
     date_range: Tuple[Optional[datetime], Optional[datetime]],
+    simplify: bool = True,
 ):
     repo = Repo(path)
     refs = repo.filter_refs(
@@ -328,7 +351,17 @@ def generate_dot_script(
         use_regex=pattern_type == "regex",
     )
     logger.info("filtered refs: " + json.dumps(refs, indent=2))
-    logs = repo.filter_history(refs)
+
+    logs = repo.history(refs)
+    log_size = len(logs)
+    logger.info(f"history size: {log_size}")
+    while simplify:
+        logs = filter_history(logs, refs)
+        if len(logs) < log_size:
+            log_size = len(logs)
+            logger.info(f"history size decresed to {log_size}")
+        else:
+            break
     logger.info("history json: " + json.dumps(logs, indent=2))
 
     date_begin, date_end = date_range
@@ -380,7 +413,7 @@ def generate_dot_script(
             <TR>{table_html}</TR>
         </TABLE>>"""
         dot.node(commit["id"], message)
-        if commit["parent"]:
+        if commit["parent"] and commit["parent"][0] != "":
             for parent in commit["parent"]:
                 dot.edge(parent, commit["id"])
 
@@ -399,7 +432,11 @@ def create_dot_source(argv):
         ref_filters = RefFilters([], [".*"], [], [])
 
     dot_source = generate_dot_script(
-        Path(args.repository), ref_filters, args.type, args.time
+        Path(args.repository),
+        ref_filters,
+        args.type,
+        args.time,
+        not args.no_simplify,
     )
     logger.debug(dot_source)
 
