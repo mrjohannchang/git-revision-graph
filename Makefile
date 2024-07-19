@@ -16,6 +16,11 @@ define message
 @echo $(1)
 endef
 
+#* Grphviz
+.PHONY: dot-install
+dot-install:
+	sudo apt install -y graphviz
+
 #* Poetry
 .PHONY: poetry-download
 poetry-download:

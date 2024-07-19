@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import argparse
 import fnmatch
@@ -11,7 +11,7 @@ from collections import namedtuple
 from datetime import datetime
 from functools import cached_property
 from importlib import metadata as importlib_metadata
-from itertools import zip_longest
+from itertools import chain, zip_longest
 from pathlib import Path
 
 import graphviz
@@ -107,9 +107,7 @@ class Repo:
 
     @cached_property
     def tags(self):
-        return {
-            r[len("refs/tags/") :] for r in self.refs if r.startswith("refs/tagss/")
-        }
+        return {r[len("refs/tags/") :] for r in self.refs if r.startswith("refs/tags/")}
 
     def filter_refs(
         self,
@@ -154,6 +152,78 @@ class Repo:
         ) as proc:
             assert proc.stdout is not None
             return [json.loads(i.decode()) for i in proc.stdout]
+
+    def filter_history(self, refs: List[str]):
+        logs = self.history(refs)
+        logger.debug("history json before filter: " + json.dumps(logs, indent=2))
+        CommitNode = namedtuple("CommitNode", ["successors", "parents", "refs"])
+        network: Dict[str, CommitNode] = dict()
+
+        # scan the commits to build the network
+        for commit in logs:
+            node = network.setdefault(
+                commit["id"], CommitNode(successors=[], parents=[], refs=[])
+            )
+            node.parents.extend(commit["parent"].split(" "))
+            if commit["ref"] != "":
+                node.refs.extend(
+                    r.split("->")[-1].strip() for r in commit["ref"].split(", ")
+                )
+            for p in node.parents:
+                parent_node = network.setdefault(
+                    p, CommitNode(successors=[], parents=[], refs=[])
+                )
+                parent_node.successors.append(commit["id"])
+
+        # filter the refs for each commit to mark those can be removed in the graph
+        for commit_id, node in network.items():
+            important_refs = [
+                r
+                for r in node.refs
+                if (r[len("tag: ") :] if r.startswith("tag: ") else r) in refs
+            ]
+
+            # for those merge commits or last commits, ignore the filter rule
+            if len(node.successors) != 1 or len(node.parents) != 1:
+                if not important_refs:
+                    # just one ref will be given with priority: tag/other ref/commit id
+                    important_refs.append(
+                        next(
+                            chain.from_iterable(
+                                (
+                                    (r for r in node.refs if r.startswith("tag: ")),
+                                    (r for r in node.refs if not r.startswith("tag: ")),
+                                )
+                            ),
+                            f"id: {commit_id[:8]}",
+                        )
+                    )
+
+            node.refs.clear()
+            node.refs.extend(important_refs)
+
+        # for the init commits, give it a default tag
+        for i, root_id in enumerate(network.pop("").successors):
+            if not network[root_id].refs:
+                network[root_id].refs.append("INIT" if i == 0 else f"Orphan{i}")
+
+        logs = [commit for commit in logs if network[commit["id"]].refs]
+        for commit in logs:
+            node = network[commit["id"]]
+            parents = [p for p in node.parents if p != ""]
+            for p in range(len(parents)):
+                parent_id = node.parents[p]
+                while True:
+                    if network[parent_id].refs:
+                        # it will always exit because we have guard on the init commits
+                        break
+                    else:
+                        # the to be removed node must have only one parent
+                        parent_id = network[parent_id].parents[0]
+                parents[p] = parent_id
+            commit["parent"] = list(set(parents))
+            commit["ref"] = list(set(node.refs))
+        return logs
 
 
 def parse_args(argv):
@@ -258,7 +328,7 @@ def generate_dot_script(
         use_regex=pattern_type == "regex",
     )
     logger.info("filtered refs: " + json.dumps(refs, indent=2))
-    logs = repo.history(refs)
+    logs = repo.filter_history(refs)
     logger.info("history json: " + json.dumps(logs, indent=2))
 
     date_begin, date_end = date_range
@@ -270,37 +340,37 @@ def generate_dot_script(
             date_end is not None and date > date_end
         ):
             continue
-        if commit["ref"] != "":
-            refs = [r.split("->")[-1].strip() for r in commit["ref"].split(",")]
 
-            refs_html = []
-            remote_branches = set()
-            local_branches = set()
-            for r in refs:
-                if r.startswith("tag: "):
-                    refs_html.append(f'<TD BGCOLOR="lightgrey">{r[len("tag: "):]}</TD>')
-                elif r in repo.remote_branches:
-                    remote_branches.add(r)
-                else:
-                    local_branches.add(r)
+        refs_html = []
+        remote_branches = set()
+        local_branches = set()
+        for r in commit["ref"]:
+            if r.startswith("tag: "):
+                refs_html.append(f'<TD BGCOLOR="lightgrey">{r[len("tag: "):]}</TD>')
+            elif r.startswith("id: "):
+                refs_html.append(
+                    f'<TD><font color="grey">{r[len("id: "):]}</font></TD>'
+                )
+            elif r in repo.remote_branches:
+                remote_branches.add(r)
+            else:
+                local_branches.add(r)
 
-            for r in remote_branches:
-                local_r = r.split("/", maxsplit=1)[-1]
-                if local_r in local_branches:
-                    refs_html.append(f"<TD><B>{r}</B></TD>")
-                    local_branches.remove(local_r)
-                else:
-                    refs_html.append(f"<TD>{r}</TD>")
+        for r in remote_branches:
+            local_r = r.split("/", maxsplit=1)[-1]
+            if local_r in local_branches:
+                refs_html.append(f"<TD><B>{r}</B></TD>")
+                local_branches.remove(local_r)
+            else:
+                refs_html.append(f"<TD>{r}</TD>")
 
-            for r in local_branches:
-                refs_html.append(f'<TD><font color="lightblue">{r}</font></TD>')
+        for r in local_branches:
+            refs_html.append(f'<TD><font color="lightblue">{r}</font></TD>')
 
-            table_html = "</TR><TR>".join(
-                f"{l}{r}"
-                for l, r in zip_longest(refs_html[::2], refs_html[1::2], fillvalue="")
-            )
-        else:
-            table_html = f'<TD><font color="grey">{commit["id"][:8]}</font></TD>'
+        table_html = "</TR><TR>".join(
+            f"{l}{r}"
+            for l, r in zip_longest(refs_html[::2], refs_html[1::2], fillvalue="")
+        )
 
         message = f"""<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
             <TR>
@@ -310,8 +380,8 @@ def generate_dot_script(
             <TR>{table_html}</TR>
         </TABLE>>"""
         dot.node(commit["id"], message)
-        if commit["parent"] != "":
-            for parent in commit["parent"].split(" "):
+        if commit["parent"]:
+            for parent in commit["parent"]:
                 dot.edge(parent, commit["id"])
 
     return dot.source
