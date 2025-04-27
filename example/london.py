@@ -19,9 +19,10 @@ def create_git_repo(git_repo_path: Path):
         return
 
     subprocess.run(
-        "curl -s https://raw.githubusercontent.com/quarbby/london-git/master/london.sh > london.sh; sed 's#checkout --orphan#branch#g' london.sh | bash",
+        "(curl -s https://raw.githubusercontent.com/quarbby/london-git/master/london.sh > london.sh) && (sed 's#checkout --orphan#branch#g' london.sh | bash)",
         shell=True,
         cwd=git_repo_path,
+        check=True,
     )
 
 
@@ -30,7 +31,8 @@ if __name__ == "__main__":
     create_git_repo(git_repo_path)
     create_dot_source([str(git_repo_path), "-o", str(git_repo_path / "git-graph.dot")])
     subprocess.run(
-        "dot -o git-graph.svg git-graph.dot",
+        "dot -Tpng -o ../london.subway.png git-graph.dot",
         shell=True,
         cwd=git_repo_path,
+        check=True,
     )
