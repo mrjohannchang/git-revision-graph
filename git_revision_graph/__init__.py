@@ -259,7 +259,7 @@ example:
     )
 
     parser.add_argument(
-        "--patterh",
+        "--pattern",
         "-p",
         type=str,
         nargs="+",
@@ -427,7 +427,7 @@ def create_dot_source(argv):
         print(version)
         return
 
-    ref_filters = RefFilters(args.patterh, args.local, args.remote, args.tags)
+    ref_filters = RefFilters(args.pattern, args.local, args.remote, args.tags)
     if all(len(i) == 0 for i in ref_filters):
         ref_filters = RefFilters([], [".*"], [], [])
 
