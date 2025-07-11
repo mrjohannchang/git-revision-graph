@@ -415,7 +415,7 @@ def generate_dot_script(
         dot.node(commit["id"], message)
         if commit["parent"] and commit["parent"][0] != "":
             for parent in commit["parent"]:
-                dot.edge(parent, commit["id"])
+                dot.edge(commit["id"], parent)
 
     return dot.source
 
