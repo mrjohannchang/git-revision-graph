@@ -2,7 +2,7 @@
 
 Generate revision graph like TortoiseGit did for chosen branches
 
-To install, use command `pip install git-revision-graph.
+To install, use command `pip install git-revision-graph. [Graphviz](https://graphviz.org) CLI has to be installed manually for SVG export.
 
 Use `python -m git_revision_graph --tags '.*' -o graph.svg` inside any git repository to generate a diagram which shows the major operation, e.g. such as this repo tags diagram.
 
